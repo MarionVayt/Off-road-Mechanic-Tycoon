@@ -6,5 +6,6 @@ using UnityEngine;
 public class SaveData
 {
     public float MoneyOfPlayer;
-    
+    public int toolUpgradeLevel; 
+    public int discountUpgradeLevel;
 }

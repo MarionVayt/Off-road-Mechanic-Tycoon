@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using TMPro;
 using UnityEngine.UI;
@@ -9,6 +10,16 @@ public class GarageManager : MonoBehaviour
     public float PlayerMoney { get; private set; }
     private float _currentCarPayout = 0f;
     private bool _isRepairing = false;
+    private int _toolUpgradeLevel = 0;
+    private int _discountUpgradeLevel = 0;
+    private string[] _clientStories = new string[]
+    {
+        "Влетів у яму на трасі, подивіться ходову.",
+        "Двигун троїть і жере масло. Допоможіть!",
+        "Глючить електроніка, фари живуть своїм життям.",
+        "Потрібне повне ТО перед продажем авто.",
+        "Дружина каже, що щось стукає. Я не чую, але перевірте."
+    };
     
     [Header("UI Елементи")]
     public TextMeshProUGUI moneyText;
@@ -16,12 +27,27 @@ public class GarageManager : MonoBehaviour
     public TextMeshProUGUI runningGearConditionText;
     public TextMeshProUGUI bodyConditionText;
     public TextMeshProUGUI electronicsConditionText;
+    public Image carDisplayImage;
+    
+    [Header("UI Елементи - Меню ремонту")]
     public GameObject repairMenuPanel;
     public TextMeshProUGUI enginePriceText;
     public TextMeshProUGUI runningGearPriceText;
     public TextMeshProUGUI bodyPriceText;
     public TextMeshProUGUI electronicsPriceText;
-    public Image carDisplayImage;
+    
+    [Header("UI Елементи - Магазин")]
+    public GameObject shopPanel;
+    public TextMeshProUGUI toolUpgradeText;
+    public TextMeshProUGUI discountUpgradeText;
+    
+    [Header("Система замовлень")]
+    public GameObject orderPanel;
+    public Transform orderContainer;
+    public GameObject orderPrefab;
+    
+    private List<Order> _activeOrders = new List<Order>();
+    private float _nextOrderTimer = 0f;
 
     private void Start()
     {
@@ -32,6 +58,8 @@ public class GarageManager : MonoBehaviour
         if (loadedData != null)
         {
             PlayerMoney = loadedData.MoneyOfPlayer;
+            _toolUpgradeLevel = loadedData.toolUpgradeLevel;
+            _discountUpgradeLevel = loadedData.discountUpgradeLevel;
             Debug.Log("Гроші успішно завантажено. Баланс: " + PlayerMoney);
         }
         else
@@ -43,6 +71,55 @@ public class GarageManager : MonoBehaviour
         Debug.Log("Гараж відкрито! Чекаємо на клієнтів.");
         UpdateUI();
         repairMenuPanel.SetActive(false);
+        shopPanel.SetActive(false);
+    }
+    
+    private void Update()
+    {
+        if (_currentCarInBox == null && !_isRepairing)
+        {
+            HandleOrderSpawning();
+        }
+
+        HandleOrderTimers();
+    }
+    
+    private void GenerateNewOrder()
+    {
+        Vehicle newCar = _factory.GetRandomBrokenCar();
+        
+        string randomStory = _clientStories[Random.Range(0, _clientStories.Length)];
+        
+        float randomTime = Random.Range(15f, 25f);
+        
+        Order newOrder = new Order(newCar, randomStory, randomTime);
+        
+        _activeOrders.Add(newOrder);
+        
+        UpdateOrderUI();
+    }
+
+    private void HandleOrderSpawning()
+    {
+        _nextOrderTimer -= Time.deltaTime;
+        if (_nextOrderTimer <= 0f && _activeOrders.Count < 3)
+        {
+            GenerateNewOrder();
+            _nextOrderTimer = Random.Range(5f, 10f);
+        }
+    }
+    
+    private void HandleOrderTimers()
+    {
+        for (int i = _activeOrders.Count - 1; i >= 0; i--)
+        {
+            _activeOrders[i].TimeLeft -= Time.deltaTime;
+            if (_activeOrders[i].TimeLeft <= 0)
+            {
+                _activeOrders.RemoveAt(i);
+                UpdateOrderUI();
+            }
+        }
     }
 
     private void UpdateUI()
@@ -68,17 +145,33 @@ public class GarageManager : MonoBehaviour
             electronicsConditionText.text = "Електроніка: ---";
         }
     }
-
-    public void AcceptNewClient()
+    
+    private void UpdateOrderUI()
     {
-        if (_currentCarInBox != null || _isRepairing)
+        foreach (Transform child in orderContainer)
         {
-            Debug.LogWarning("Бокс зайнятий! Спочатку відремонтуйте поточну машину.");
-            return;
+            Destroy(child.gameObject);
         }
+        
+        foreach (Order order in _activeOrders)
+        {
+            GameObject newCard = Instantiate(orderPrefab, orderContainer);
+            
+            OrderUIElement uiElement = newCard.GetComponent<OrderUIElement>();
+            uiElement.Setup(order, this);
+        }
+    }
 
-        _currentCarInBox = _factory.GetRandomBrokenCar();
+    public void AcceptOrder(Order acceptedOrder)
+    {
+        if (_currentCarInBox != null || _isRepairing) return;
+        
+        _currentCarInBox = acceptedOrder.Car;
         _currentCarPayout = 50f * _currentCarInBox.ClassMultiplier;
+        
+        _activeOrders.Remove(acceptedOrder);
+
+        UpdateOrderUI(); 
         UpdateUI();
     }
 
@@ -86,13 +179,15 @@ public class GarageManager : MonoBehaviour
     {
         if (_currentCarInBox == null || _isRepairing) return; 
 
-        float costOfRepair = GetRepairCost(part);
+        float baseCost = GetRepairCost(part);
+        if (baseCost == 0f) return;
+        
+        float discountMultiplier = 1.0f - (_discountUpgradeLevel * 0.1f);
+        float actualCostToPay = baseCost * discountMultiplier;
 
-        if (costOfRepair == 0f) return;
-
-        if (PlayerMoney >= costOfRepair)
+        if (PlayerMoney >= actualCostToPay)
         {
-            StartCoroutine(RepairRoutine(part, costOfRepair));
+            StartCoroutine(RepairRoutine(part, actualCostToPay, baseCost));
         }
         else
         {
@@ -100,20 +195,20 @@ public class GarageManager : MonoBehaviour
         }
     }
 
-    private System.Collections.IEnumerator RepairRoutine(Vehicle.CarPart part, float costOfRepair)
+    private System.Collections.IEnumerator RepairRoutine(Vehicle.CarPart part, float actualCostToPay, float baseCost)
     {
-        _isRepairing =  true;
-
-        yield return new WaitForSeconds(2.0f);
+        _isRepairing = true;
         
-        PlayerMoney -= costOfRepair;
+        float repairTime = Mathf.Max(0.5f, 2.5f - (_toolUpgradeLevel * 0.5f)); 
+        
+        yield return new WaitForSeconds(repairTime); 
+        
+        PlayerMoney -= actualCostToPay;
         _currentCarInBox.SetPartConditionToMax(part);
-        _currentCarPayout += costOfRepair * 1.5f;
         
-        _isRepairing = false;
+        _currentCarPayout += baseCost * 1.5f; 
 
-        Debug.Log("Ремонт успішно завершено!");
-        
+        _isRepairing = false;
         UpdateUI();
         SaveGame();
     }
@@ -222,11 +317,63 @@ public class GarageManager : MonoBehaviour
         bodyPriceText.text = $"Кузов: {GetRepairCost(Vehicle.CarPart.Body)}$";
         electronicsPriceText.text = $"Електроніка: {GetRepairCost(Vehicle.CarPart.Electronics)}$";
     }
+    
+    public void BuyToolUpgrade()
+    {
+        float upgradePrice = 1000f + (_toolUpgradeLevel * 1000f); 
+
+        if (PlayerMoney >= upgradePrice)
+        {
+            PlayerMoney -= upgradePrice;
+            _toolUpgradeLevel++;
+            Debug.Log($"Інструменти прокачано! Поточний рівень: {_toolUpgradeLevel}");
+            SaveGame();
+            UpdateUI();
+            UpdateShopUI();
+        }
+    }
+
+    public void BuyDiscountUpgrade()
+    {
+        float upgradePrice = 1500f + (_discountUpgradeLevel * 1500f);
+
+        if (PlayerMoney >= upgradePrice)
+        {
+            PlayerMoney -= upgradePrice;
+            _discountUpgradeLevel++;
+            Debug.Log($"Оптові закупівлі прокачано! Поточний рівень: {_discountUpgradeLevel}");
+            SaveGame();
+            UpdateUI();
+            UpdateShopUI();
+        }
+    }
+    
+    public void OpenShop()
+    {
+        UpdateShopUI();
+        shopPanel.SetActive(true);
+    }
+
+    public void CloseShop()
+    {
+        shopPanel.SetActive(false);
+    }
+
+    private void UpdateShopUI()
+    {
+        float nextToolPrice = 1000f + (_toolUpgradeLevel * 1000f);
+        float nextDiscountPrice = 1500f + (_discountUpgradeLevel * 1500f);
+        
+        toolUpgradeText.text = $"Швидкі інструменти (Рівень {_toolUpgradeLevel})\nЦіна: {nextToolPrice}$";
+        discountUpgradeText.text = $"Оптові закупівлі (Рівень {_discountUpgradeLevel})\nЦіна: {nextDiscountPrice}$";
+    }
 
     private void SaveGame()
     {
         SaveData dataToSave = new SaveData();
         dataToSave.MoneyOfPlayer = PlayerMoney;
+        dataToSave.toolUpgradeLevel = _toolUpgradeLevel;
+        dataToSave.discountUpgradeLevel = _discountUpgradeLevel;
         SaveManager.Save(dataToSave);
     }
 }
