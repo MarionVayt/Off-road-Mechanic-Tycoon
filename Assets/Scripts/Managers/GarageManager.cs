@@ -60,6 +60,35 @@ public class GarageManager : MonoBehaviour
     public Transform orderContainer;
     public GameObject orderPrefab;
     public GameObject notificationBadge;
+    
+    [Header("Налаштування Економіки та Часу")]
+    [Tooltip("Мінімальний час, за який треба прийняти замовлення")]
+    public float minOrderTime = 15f;
+    [Tooltip("Максимальний час, за який треба прийняти замовлення")]
+    public float maxOrderTime = 25f;
+    
+    [Space]
+    [Tooltip("Час між появою нових клієнтів (мін/макс)")]
+    public float minSpawnInterval = 5f;
+    public float maxSpawnInterval = 10f;
+
+    [Space]
+    [Tooltip("Базова виплата за прийняття авто")]
+    public float baseAcceptancePayout = 50f;
+    [Tooltip("Множник виплати при видачі авто (напр. 1.5 = +50% прибутку)")]
+    public float profitMultiplier = 1.5f;
+
+    [Space]
+    [Tooltip("Вартість ремонту при стані < 80%")]
+    public float repairCostMajor = 200f;
+    [Tooltip("Вартість ремонту при стані > 80%")]
+    public float repairCostMinor = 50f;
+
+    [Space]
+    [Tooltip("Базовий час ремонту однієї деталі")]
+    public float baseRepairTime = 2.5f;
+    [Tooltip("Мінімально можливий час ремонту (після апгрейдів)")]
+    public float minRepairSpeed = 0.5f;
 
     private List<Order> _activeOrders = new List<Order>();
     private float _nextOrderTimer = 0f;
@@ -103,19 +132,19 @@ public class GarageManager : MonoBehaviour
         if (_nextOrderTimer <= 0f && _activeOrders.Count < 3)
         {
             GenerateNewOrder();
-            _nextOrderTimer = Random.Range(5f, 10f);
+            _nextOrderTimer = Random.Range(minSpawnInterval, maxSpawnInterval);
         }
     }
 
     private void GenerateNewOrder()
     {
         Vehicle newCar = _factory.GetRandomBrokenCar();
-        Order newOrder = new Order(newCar, _clientStories[Random.Range(0, _clientStories.Length)], Random.Range(15f, 25f));
+        float randomTime = Random.Range(minOrderTime, maxOrderTime);
+        Order newOrder = new Order(newCar, _clientStories[Random.Range(0, _clientStories.Length)], randomTime);
+        
         _activeOrders.Add(newOrder);
         UpdateOrderUI();
-
-        if (orderPanel != null && !orderPanel.activeSelf)
-            notificationBadge?.SetActive(true);
+        if (orderPanel != null && !orderPanel.activeSelf) notificationBadge?.SetActive(true);
     }
     
     private void HandleOrderTimers()
@@ -136,9 +165,9 @@ public class GarageManager : MonoBehaviour
         if (_currentCarInBox != null || _isRepairing) return;
 
         _currentCarInBox = acceptedOrder.Car;
-        _currentCarPayout = 50f * _currentCarInBox.ClassMultiplier;
+        _currentCarPayout = baseAcceptancePayout * _currentCarInBox.ClassMultiplier;
+        
         _activeOrders.Clear();
-
         UpdateOrderUI();
         UpdateUI();
         orderPanel?.SetActive(false);
@@ -221,7 +250,7 @@ public class GarageManager : MonoBehaviour
     {
         _isRepairing = true;
         
-        float totalRepairTime = Mathf.Max(0.5f, 2.5f - (_toolUpgradeLevel * 0.5f)); 
+        float totalRepairTime = Mathf.Max(minRepairSpeed, baseRepairTime - (_toolUpgradeLevel * 0.5f));
         float elapsedTime = 0f;
 
         if (row != null && row.priceText != null)
@@ -247,7 +276,7 @@ public class GarageManager : MonoBehaviour
             
         PlayerMoney -= cost;
         _currentCarInBox.SetPartConditionToMax(part);
-        _currentCarPayout += baseCost * 1.5f;
+        _currentCarPayout += baseCost * profitMultiplier; 
         
         _isRepairing = false;
         UpdateUI();
@@ -280,7 +309,8 @@ public class GarageManager : MonoBehaviour
         else if (part == Vehicle.CarPart.Electronics) cond = _currentCarInBox.ConditionOfElectronic;
 
         if (cond >= 100f) return 0f;
-        return (cond < 80f ? 200f : 50f) * _currentCarInBox.ClassMultiplier;
+        float price = (cond < 80f ? repairCostMajor : repairCostMinor);
+        return price * _currentCarInBox.ClassMultiplier;
     }
     
     public void ToggleShopPanel()
