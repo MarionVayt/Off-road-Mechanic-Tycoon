@@ -3,7 +3,6 @@ using UnityEngine;
 using TMPro;
 using UnityEngine.UI;
 
-
 [System.Serializable]
 public class RepairRowUI
 {
@@ -12,6 +11,7 @@ public class RepairRowUI
     public Button repairButton; 
     public Image progressBarImage;
 }
+
 [System.Serializable]
 public class ShopRowUI
 {
@@ -20,13 +20,24 @@ public class ShopRowUI
     public Button buyButton;
 }
 
+[System.Serializable]
+public class ServiceRowUI
+{
+    public TextMeshProUGUI infoText;
+    public TextMeshProUGUI priceText;
+    public Button serviceButton;
+    public Image progressBarImage;
+}
+
 public class GarageManager : MonoBehaviour
 {
-    private CarFactory _factory;
+    private ICarFactory _factory;
     private Vehicle _currentCarInBox;
+    private BasePayout _basePayoutSystem;
+    private IPayout _finalPayoutSystem;
     public float PlayerMoney { get; private set; }
     private float _currentCarPayout = 0f;
-    private bool _isRepairing = false;
+    private IGarageState _currentState;
     private int _toolUpgradeLevel = 0;
     private int _discountUpgradeLevel = 0;
 
@@ -42,6 +53,10 @@ public class GarageManager : MonoBehaviour
     [Header("Головний UI")]
     public TextMeshProUGUI moneyText;
     public Image carDisplayImage;
+    
+    [Header("Вкладки меню ремонту")]
+    public GameObject repairPage;
+    public GameObject servicePage;
 
     [Header("Панель Ремонту (Рядки)")]
     public GameObject repairMenuPanel;
@@ -49,6 +64,10 @@ public class GarageManager : MonoBehaviour
     public RepairRowUI gearRow;
     public RepairRowUI bodyRow;
     public RepairRowUI electroRow;
+    
+    [Header("Панель Послуг (Вкладка послуг)")]
+    public ServiceRowUI carWashRow;
+    public ServiceRowUI interiorCleaningRow;
 
     [Header("Панель Магазину")]
     public GameObject shopPanel;
@@ -62,40 +81,30 @@ public class GarageManager : MonoBehaviour
     public GameObject notificationBadge;
     
     [Header("Налаштування Економіки та Часу")]
-    [Tooltip("Мінімальний час, за який треба прийняти замовлення")]
     public float minOrderTime = 15f;
-    [Tooltip("Максимальний час, за який треба прийняти замовлення")]
     public float maxOrderTime = 25f;
-    
-    [Space]
-    [Tooltip("Час між появою нових клієнтів (мін/макс)")]
     public float minSpawnInterval = 5f;
     public float maxSpawnInterval = 10f;
-
-    [Space]
-    [Tooltip("Базова виплата за прийняття авто")]
     public float baseAcceptancePayout = 50f;
-    [Tooltip("Множник виплати при видачі авто (напр. 1.5 = +50% прибутку)")]
     public float profitMultiplier = 1.5f;
-
-    [Space]
-    [Tooltip("Вартість ремонту при стані < 80%")]
     public float repairCostMajor = 200f;
-    [Tooltip("Вартість ремонту при стані > 80%")]
     public float repairCostMinor = 50f;
-
-    [Space]
-    [Tooltip("Базовий час ремонту однієї деталі")]
     public float baseRepairTime = 2.5f;
-    [Tooltip("Мінімально можливий час ремонту (після апгрейдів)")]
     public float minRepairSpeed = 0.5f;
-
+    
+    [Space]
+    [Header("Налаштування Послуг")]
+    public float carWashCost = 20f;
+    public float interiorCleaningCost = 50f; 
+    public float serviceTime = 1.5f;
     private List<Order> _activeOrders = new List<Order>();
     private float _nextOrderTimer = 0f;
 
     private void Start()
     {
-        _factory = new CarFactory();
+        _currentState = new GarageIdleState();
+        
+        _factory = new CarFactoryLoggerProxy();
         SaveData loadedData = SaveManager.Load();
 
         if (loadedData != null)
@@ -118,13 +127,12 @@ public class GarageManager : MonoBehaviour
 
     private void Update()
     {
-        if (_currentCarInBox == null && !_isRepairing)
+        if (_currentState is GarageIdleState)
         {
             HandleOrderSpawning();
         }
         HandleOrderTimers();
     }
-
 
     private void HandleOrderSpawning()
     {
@@ -140,8 +148,15 @@ public class GarageManager : MonoBehaviour
     {
         Vehicle newCar = _factory.GetRandomBrokenCar();
         float randomTime = Random.Range(minOrderTime, maxOrderTime);
-        Order newOrder = new Order(newCar, _clientStories[Random.Range(0, _clientStories.Length)], randomTime);
         
+        IPricingStrategy randomStrategy = Random.value > 0.8f ? 
+            new VIPPricingStrategy() : new StandardPricingStrategy();
+        
+        string story = _clientStories[Random.Range(0, _clientStories.Length)];
+        if (randomStrategy is VIPPricingStrategy) story = "[VIP] " + story;
+
+        Order newOrder = new Order(newCar, story, randomTime, randomStrategy);
+    
         _activeOrders.Add(newOrder);
         UpdateOrderUI();
         if (orderPanel != null && !orderPanel.activeSelf) notificationBadge?.SetActive(true);
@@ -162,16 +177,39 @@ public class GarageManager : MonoBehaviour
 
     public void AcceptOrder(Order acceptedOrder)
     {
-        if (_currentCarInBox != null || _isRepairing) return;
+        if (!_currentState.CanAcceptOrder()) return;
 
         _currentCarInBox = acceptedOrder.Car;
         _currentCarPayout = baseAcceptancePayout * _currentCarInBox.ClassMultiplier;
+        _basePayoutSystem = new BasePayout(_currentCarPayout);
+        _finalPayoutSystem = _basePayoutSystem;
+        _currentState = new GarageOccupiedState();
         
         _activeOrders.Clear();
         UpdateOrderUI();
         UpdateUI();
         orderPanel?.SetActive(false);
         OpenRepairMenu();
+        ResetServicesUI();
+    }
+
+    private void ResetServicesUI()
+    {
+        if (carWashRow != null)
+        {
+            carWashRow.infoText.text = "АВТОМИЙКА";
+            carWashRow.priceText.text = $"ПОМИТИ ({carWashCost}$)";
+            carWashRow.serviceButton.interactable = true;
+            if (carWashRow.progressBarImage != null) carWashRow.progressBarImage.fillAmount = 0f;
+        }
+
+        if (interiorCleaningRow != null)
+        {
+            interiorCleaningRow.infoText.text = "ХІМЧИСТКА";
+            interiorCleaningRow.priceText.text = $"ОЧИСТИТИ ({interiorCleaningCost}$)";
+            interiorCleaningRow.serviceButton.interactable = true;
+            if (interiorCleaningRow.progressBarImage != null) interiorCleaningRow.progressBarImage.fillAmount = 0f;
+        }
     }
 
     public void ToggleOrderPanel()
@@ -191,12 +229,25 @@ public class GarageManager : MonoBehaviour
             newCard.GetComponent<OrderUIElement>().Setup(order, this);
         }
     }
+    
+    public void OpenRepairTab()
+    {
+        if (repairPage != null) repairPage.SetActive(true);
+        if (servicePage != null) servicePage.SetActive(false);
+    }
+
+    public void OpenServicesTab()
+    {
+        if (repairPage != null) repairPage.SetActive(false);
+        if (servicePage != null) servicePage.SetActive(true);
+    }
 
     public void OpenRepairMenu()
     {
         if (_currentCarInBox == null) return;
         UpdateUI();
         repairMenuPanel.SetActive(true);
+        OpenRepairTab();
     }
 
     public void CloseRepairMenu() => repairMenuPanel.SetActive(false);
@@ -227,60 +278,108 @@ public class GarageManager : MonoBehaviour
         row.statusText.text = $"{label} - {Mathf.RoundToInt(condition)}%";
         float cost = GetRepairCost(part);
         row.priceText.text = cost > 0 ? $"РЕМОНТ ({cost}$)" : "(ГОТОВО)";
-        row.repairButton.interactable = cost > 0; 
-        if (row.progressBarImage != null)
+        
+        if (row.progressBarImage != null && row.repairButton.interactable)
             row.progressBarImage.fillAmount = 0f;
 
-        if (row.repairButton != null)
+        if (row.repairButton != null && _currentState != null && _currentState.CanPerformAction())
             row.repairButton.interactable = cost > 0;
     }
 
     public void ProcessCarPart(Vehicle.CarPart part, RepairRowUI row)
     {
-        if (_currentCarInBox == null || _isRepairing) return;
-        float cost = GetRepairCost(part) * (1.0f - (_discountUpgradeLevel * 0.1f));
+        if (!_currentState.CanPerformAction()) return;
         
-        if (PlayerMoney >= cost) 
+        float baseCost = GetRepairCost(part); 
+        float costToPay = baseCost * (1.0f - (_discountUpgradeLevel * 0.1f));
+        
+        if (PlayerMoney >= costToPay) 
         {
-            StartCoroutine(RepairRoutine(part, cost, GetRepairCost(part), row));
+            float totalTime = Mathf.Max(minRepairSpeed, baseRepairTime - (_toolUpgradeLevel * 0.5f));
+            StartCoroutine(WorkRoutine(totalTime, row.priceText, "ЛАГОДЖУ...", row.progressBarImage, () => 
+            {
+                PlayerMoney -= costToPay;
+                
+                _currentCarInBox.SetPartConditionToMax(part);
+                
+                _basePayoutSystem.AddMoney(baseCost * profitMultiplier); 
+                
+                UpdateUI();
+            }));
         }
     }
 
-    private System.Collections.IEnumerator RepairRoutine(Vehicle.CarPart part, float cost, float baseCost, RepairRowUI row)
+    public void AddCarWashService()
     {
-        _isRepairing = true;
-        
-        float totalRepairTime = Mathf.Max(minRepairSpeed, baseRepairTime - (_toolUpgradeLevel * 0.5f));
+        if (!_currentState.CanPerformAction()) return;
+        if (PlayerMoney >= carWashCost)
+        {
+            StartCoroutine(WorkRoutine(serviceTime, carWashRow.priceText, "МИЮ...", carWashRow.progressBarImage, () => 
+            {
+                PlayerMoney -= carWashCost;
+                _finalPayoutSystem = new CarWashDecorator(_finalPayoutSystem);
+                carWashRow.serviceButton.interactable = false;
+                carWashRow.priceText.text = "ВИКОНАНО";
+                UpdateUI();
+            }));
+        }
+    }
+
+    public void AddInteriorCleaningService()
+    {
+        if (!_currentState.CanPerformAction()) return;
+        if (PlayerMoney >= interiorCleaningCost)
+        {
+            StartCoroutine(WorkRoutine(serviceTime, interiorCleaningRow.priceText, "ЧИЩУ...", interiorCleaningRow.progressBarImage, () => 
+            {
+                PlayerMoney -= interiorCleaningCost;
+                _finalPayoutSystem = new InteriorCleaningDecorator(_finalPayoutSystem);
+                interiorCleaningRow.serviceButton.interactable = false;
+                interiorCleaningRow.priceText.text = "ВИКОНАНО";
+                UpdateUI();
+            }));
+        }
+    }
+    
+    private System.Collections.IEnumerator WorkRoutine(float duration, TextMeshProUGUI statusText, string statusMessage, Image progressBar, System.Action onComplete)
+    {
+        _currentState = new GarageWorkingState();
         float elapsedTime = 0f;
 
-        if (row != null && row.priceText != null)
-            row.priceText.text = "ЛАГОДЖУ...";
+        if (statusText != null) statusText.text = statusMessage;
+        
+        DisableAllButtons();
 
-        if (row != null && row.repairButton != null)
-            row.repairButton.interactable = false;
-
-        while (elapsedTime < totalRepairTime)
+        while (elapsedTime < duration)
         {
             elapsedTime += Time.deltaTime;
-            
-            float fillPercentage = elapsedTime / totalRepairTime;
-            
-            if (row != null && row.progressBarImage != null)
-                row.progressBarImage.fillAmount = fillPercentage;
-            
+            if (progressBar != null) progressBar.fillAmount = elapsedTime / duration;
             yield return null; 
         }
         
-        if (row != null && row.progressBarImage != null)
-            row.progressBarImage.fillAmount = 1f;
+        if (progressBar != null) progressBar.fillAmount = 1f;
             
-        PlayerMoney -= cost;
-        _currentCarInBox.SetPartConditionToMax(part);
-        _currentCarPayout += baseCost * profitMultiplier; 
+        _currentState = new GarageOccupiedState();;
         
-        _isRepairing = false;
-        UpdateUI();
+        onComplete?.Invoke();
+        
+        if (carWashRow != null && carWashRow.priceText.text != "ВИКОНАНО")
+            carWashRow.serviceButton.interactable = true;
+        
+        if (interiorCleaningRow != null && interiorCleaningRow.priceText.text != "ВИКОНАНО")
+            interiorCleaningRow.serviceButton.interactable = true;
+        
         SaveGame();
+    }
+
+    private void DisableAllButtons()
+    {
+        engineRow.repairButton.interactable = false;
+        gearRow.repairButton.interactable = false;
+        bodyRow.repairButton.interactable = false;
+        electroRow.repairButton.interactable = false;
+        if (carWashRow != null) carWashRow.serviceButton.interactable = false;
+        if (interiorCleaningRow != null) interiorCleaningRow.serviceButton.interactable = false;
     }
     
     public void OnRepairEngineBtnClick() => ProcessCarPart(Vehicle.CarPart.Engine, engineRow);
@@ -290,10 +389,11 @@ public class GarageManager : MonoBehaviour
 
     public void FinishWorkAndReturnCar()
     {
-        if (_currentCarInBox == null || _isRepairing) return;
-        PlayerMoney += _currentCarPayout;
+        if (!_currentState.CanPerformAction()) return;
+        PlayerMoney += _finalPayoutSystem.CalculateFinalPayout();
         _currentCarInBox = null;
         _currentCarPayout = 0f;
+        _currentState = new GarageIdleState();
         UpdateUI();
         repairMenuPanel.SetActive(false);
         SaveGame();
@@ -317,36 +417,30 @@ public class GarageManager : MonoBehaviour
     {
         if (shopPanel == null) return;
         bool isPanelActive = shopPanel.activeSelf;
-        if (!isPanelActive)
-        {
-            UpdateShopUI();
-        }
+        if (!isPanelActive) UpdateShopUI();
         shopPanel.SetActive(!isPanelActive);
     }
+
     private void UpdateShopUI()
     {
         float nextToolPrice = 1000f + (_toolUpgradeLevel * 1000f);
         toolUpgradeRow.infoText.text = $"ШВИДКІ ІНСТРУМЕНТИ (Рівень {_toolUpgradeLevel})";
         toolUpgradeRow.priceText.text = $"КУПИТИ ({nextToolPrice}$)";
-        
         toolUpgradeRow.buyButton.interactable = PlayerMoney >= nextToolPrice;
 
         float nextDiscountPrice = 1500f + (_discountUpgradeLevel * 1500f);
         discountUpgradeRow.infoText.text = $"ОПТОВІ ЗАКУПІВЛІ (Рівень {_discountUpgradeLevel})";
         discountUpgradeRow.priceText.text = $"КУПИТИ ({nextDiscountPrice}$)";
-        
         discountUpgradeRow.buyButton.interactable = PlayerMoney >= nextDiscountPrice;
     }
 
     public void BuyToolUpgrade()
     {
         float upgradePrice = 1000f + (_toolUpgradeLevel * 1000f); 
-
         if (PlayerMoney >= upgradePrice)
         {
             PlayerMoney -= upgradePrice;
             _toolUpgradeLevel++;
-            Debug.Log($"Інструменти прокачано! Поточний рівень: {_toolUpgradeLevel}");
             SaveGame();
             UpdateUI();
             UpdateShopUI();
@@ -356,17 +450,16 @@ public class GarageManager : MonoBehaviour
     public void BuyDiscountUpgrade()
     {
         float upgradePrice = 1500f + (_discountUpgradeLevel * 1500f);
-
         if (PlayerMoney >= upgradePrice)
         {
             PlayerMoney -= upgradePrice;
             _discountUpgradeLevel++;
-            Debug.Log($"Оптові закупівлі прокачано! Поточний рівень: {_discountUpgradeLevel}");
             SaveGame();
             UpdateUI();
             UpdateShopUI();
         }
     }
+
     private void SaveGame() 
     { 
         SaveData dataToSave = new SaveData();

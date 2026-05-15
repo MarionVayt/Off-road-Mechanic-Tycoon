@@ -2,7 +2,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
-public class CarFactory
+public class CarFactory : ICarFactory
 {
     private CarData[] _availableCars;
     public CarFactory()
