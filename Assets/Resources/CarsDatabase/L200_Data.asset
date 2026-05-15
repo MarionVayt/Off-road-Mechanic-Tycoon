@@ -15,3 +15,5 @@ MonoBehaviour:
   Brand: 'Mitsubishi '
   Model: L 200
   IsAutomaticTransmission: 0
+  CarImage: {fileID: 21300000, guid: 9f58c12fc67b57e43a83d541757a3324, type: 3}
+  ClassMultiplier: 1
