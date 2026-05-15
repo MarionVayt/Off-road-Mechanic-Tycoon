@@ -40,6 +40,8 @@ public class GarageManager : MonoBehaviour
     private IGarageState _currentState;
     private int _toolUpgradeLevel = 0;
     private int _discountUpgradeLevel = 0;
+    public int PlayerLevel { get; private set; } = 1;
+    public float PlayerXP { get; private set; } = 0f;
 
     private string[] _clientStories = new string[]
     {
@@ -53,6 +55,14 @@ public class GarageManager : MonoBehaviour
     [Header("Головний UI")]
     public TextMeshProUGUI moneyText;
     public Image carDisplayImage;
+    
+    [Header("Система Рівнів (UI)")]
+    public TextMeshProUGUI levelText;
+    public Image xpProgressBar;
+    
+    [Header("Система сповіщень (Попапи)")]
+    public GameObject warningPanel;
+    public TextMeshProUGUI warningText;
     
     [Header("Вкладки меню ремонту")]
     public GameObject repairPage;
@@ -112,6 +122,8 @@ public class GarageManager : MonoBehaviour
             PlayerMoney = loadedData.MoneyOfPlayer;
             _toolUpgradeLevel = loadedData.toolUpgradeLevel;
             _discountUpgradeLevel = loadedData.discountUpgradeLevel;
+            PlayerLevel = loadedData.playerLevel == 0 ? 1 : loadedData.playerLevel; 
+            PlayerXP = loadedData.playerXP;
         }
         else
         {
@@ -132,6 +144,26 @@ public class GarageManager : MonoBehaviour
             HandleOrderSpawning();
         }
         HandleOrderTimers();
+    }
+    
+    private float GetXPForNextLevel()
+    {
+        return 100f * PlayerLevel * 1.5f; 
+    }
+    
+    private void AddXP(float amount)
+    {
+        PlayerXP += amount;
+
+        while (PlayerXP >= GetXPForNextLevel())
+        {
+            PlayerXP -= GetXPForNextLevel();
+            PlayerLevel++;
+            Debug.Log($"РІВЕНЬ ПІДВИЩЕНО! Тепер ти механік {PlayerLevel} рівня!");
+            
+            PlayerMoney += 500f * PlayerLevel;
+        }
+        UpdateUI();
     }
 
     private void HandleOrderSpawning()
@@ -255,6 +287,12 @@ public class GarageManager : MonoBehaviour
     private void UpdateUI()
     {
         moneyText.text = $"Баланс: {PlayerMoney}$";
+        
+        if (levelText != null) 
+            levelText.text = $"Рівень: {PlayerLevel}";
+            
+        if (xpProgressBar != null) 
+            xpProgressBar.fillAmount = PlayerXP / GetXPForNextLevel();
 
         if (_currentCarInBox != null)
         {
@@ -277,19 +315,53 @@ public class GarageManager : MonoBehaviour
         if (row == null) return;
         row.statusText.text = $"{label} - {Mathf.RoundToInt(condition)}%";
         float cost = GetRepairCost(part);
-        row.priceText.text = cost > 0 ? $"РЕМОНТ ({cost}$)" : "(ГОТОВО)";
         
-        if (row.progressBarImage != null && row.repairButton.interactable)
-            row.progressBarImage.fillAmount = 0f;
+        int reqPlayerLevel = 1;
+        int reqToolLevel = 0;
+        if (part == Vehicle.CarPart.RunningGear) { reqPlayerLevel = 2; reqToolLevel = 1; }
+        else if (part == Vehicle.CarPart.Body) { reqPlayerLevel = 3; reqToolLevel = 2; }
+        else if (part == Vehicle.CarPart.Electronics) { reqPlayerLevel = 4; reqToolLevel = 3; }
 
-        if (row.repairButton != null && _currentState != null && _currentState.CanPerformAction())
-            row.repairButton.interactable = cost > 0;
+        bool isUnlocked = (PlayerLevel >= reqPlayerLevel && _toolUpgradeLevel >= reqToolLevel);
+        
+        if (cost <= 0)
+        {
+            row.priceText.text = "(ГОТОВО)";
+            row.repairButton.interactable = false;
+        }
+        else if (!isUnlocked)
+        {
+            row.priceText.text = "НЕДОСТУПНО"; 
+            row.repairButton.interactable = (_currentState != null && _currentState.CanPerformAction());
+        }
+        else
+        {
+            row.priceText.text = $"РЕМОНТ ({cost}$)";
+            row.repairButton.interactable = (_currentState != null && _currentState.CanPerformAction());
+        }
+
+        if (row.progressBarImage != null && cost > 0)
+            row.progressBarImage.fillAmount = 0f;
     }
 
     public void ProcessCarPart(Vehicle.CarPart part, RepairRowUI row)
     {
-        if (!_currentState.CanPerformAction()) return;
+        if (_currentCarInBox == null || !_currentState.CanPerformAction()) return;
         
+        int reqPlayerLevel = 1;
+        int reqToolLevel = 0;
+        string toolName = "Базовий набір";
+
+        if (part == Vehicle.CarPart.RunningGear) { reqPlayerLevel = 2; reqToolLevel = 1; toolName = "Підйомник (Інструменти Рівень 1)"; }
+        else if (part == Vehicle.CarPart.Body) { reqPlayerLevel = 3; reqToolLevel = 2; toolName = "Зварка (Інструменти Рівень 2)"; }
+        else if (part == Vehicle.CarPart.Electronics) { reqPlayerLevel = 4; reqToolLevel = 3; toolName = "Сканер (Інструменти Рівень 3)"; }
+
+        if (PlayerLevel < reqPlayerLevel || _toolUpgradeLevel < reqToolLevel)
+        {
+            ShowWarning($"ДЛЯ РЕМОНТУ ПОТРІБНО:\nРівень гравця: {reqPlayerLevel}\nНеобхідний інструмент:\n{toolName}");
+            return;
+        }
+
         float baseCost = GetRepairCost(part); 
         float costToPay = baseCost * (1.0f - (_discountUpgradeLevel * 0.1f));
         
@@ -298,14 +370,15 @@ public class GarageManager : MonoBehaviour
             float totalTime = Mathf.Max(minRepairSpeed, baseRepairTime - (_toolUpgradeLevel * 0.5f));
             StartCoroutine(WorkRoutine(totalTime, row.priceText, "ЛАГОДЖУ...", row.progressBarImage, () => 
             {
-                PlayerMoney -= costToPay;
-                
-                _currentCarInBox.SetPartConditionToMax(part);
-                
+                PlayerMoney -= costToPay; 
+                _currentCarInBox.SetPartConditionToMax(part); 
                 _basePayoutSystem.AddMoney(baseCost * profitMultiplier); 
-                
                 UpdateUI();
             }));
+        }
+        else
+        {
+            ShowWarning("НЕ ВИСТАЧАЄ ГРОШЕЙ НА ЗАПЧАСТИНИ!");
         }
     }
 
@@ -339,6 +412,17 @@ public class GarageManager : MonoBehaviour
                 UpdateUI();
             }));
         }
+    }
+    
+    public void ShowWarning(string message)
+    {
+        if (warningText != null) warningText.text = message;
+        if (warningPanel != null) warningPanel.SetActive(true);
+    }
+    
+    public void CloseWarning()
+    {
+        if (warningPanel != null) warningPanel.SetActive(false);
     }
     
     private System.Collections.IEnumerator WorkRoutine(float duration, TextMeshProUGUI statusText, string statusMessage, Image progressBar, System.Action onComplete)
@@ -389,11 +473,18 @@ public class GarageManager : MonoBehaviour
 
     public void FinishWorkAndReturnCar()
     {
-        if (!_currentState.CanPerformAction()) return;
-        PlayerMoney += _finalPayoutSystem.CalculateFinalPayout();
+        if (!_currentState.CanPerformAction()) return; 
+
+        float finalMoney = _finalPayoutSystem.CalculateFinalPayout(); 
+
+        PlayerMoney += finalMoney; 
+
+        AddXP(finalMoney); 
+
         _currentCarInBox = null;
         _currentCarPayout = 0f;
-        _currentState = new GarageIdleState();
+        _currentState = new GarageIdleState(); 
+
         UpdateUI();
         repairMenuPanel.SetActive(false);
         SaveGame();
@@ -424,18 +515,47 @@ public class GarageManager : MonoBehaviour
     private void UpdateShopUI()
     {
         float nextToolPrice = 1000f + (_toolUpgradeLevel * 1000f);
-        toolUpgradeRow.infoText.text = $"ШВИДКІ ІНСТРУМЕНТИ (Рівень {_toolUpgradeLevel})";
-        toolUpgradeRow.priceText.text = $"КУПИТИ ({nextToolPrice}$)";
-        toolUpgradeRow.buyButton.interactable = PlayerMoney >= nextToolPrice;
+        int reqPlayerLevelTool = _toolUpgradeLevel + 2; 
 
+        toolUpgradeRow.infoText.text = $"ШВИДКІ ІНСТРУМЕНТИ (Рівень {_toolUpgradeLevel})";
+        
+        if (PlayerLevel < reqPlayerLevelTool)
+        {
+            toolUpgradeRow.priceText.text = $"НЕДОСТУПНО (з {reqPlayerLevelTool} Рівня)";
+        }
+        else
+        {
+            toolUpgradeRow.priceText.text = $"КУПИТИ ({nextToolPrice}$)";
+        }
+        
+        toolUpgradeRow.buyButton.interactable = true; 
+        
         float nextDiscountPrice = 1500f + (_discountUpgradeLevel * 1500f);
+        int reqPlayerLevelDiscount = _discountUpgradeLevel + 2;
+
         discountUpgradeRow.infoText.text = $"ОПТОВІ ЗАКУПІВЛІ (Рівень {_discountUpgradeLevel})";
-        discountUpgradeRow.priceText.text = $"КУПИТИ ({nextDiscountPrice}$)";
-        discountUpgradeRow.buyButton.interactable = PlayerMoney >= nextDiscountPrice;
+        
+        if (PlayerLevel < reqPlayerLevelDiscount)
+        {
+            discountUpgradeRow.priceText.text = $"НЕДОСТУПНО (з {reqPlayerLevelDiscount} Рівня)";
+        }
+        else
+        {
+            discountUpgradeRow.priceText.text = $"КУПИТИ ({nextDiscountPrice}$)";
+        }
+        discountUpgradeRow.buyButton.interactable = true;
     }
 
     public void BuyToolUpgrade()
     {
+        int requiredPlayerLevel = _toolUpgradeLevel + 2; 
+
+        if (PlayerLevel < requiredPlayerLevel)
+        {
+            ShowWarning($"Цей інструмент доступний\nтільки з {requiredPlayerLevel} Рівня Гравця!");
+            return;
+        }
+
         float upgradePrice = 1000f + (_toolUpgradeLevel * 1000f); 
         if (PlayerMoney >= upgradePrice)
         {
@@ -449,11 +569,19 @@ public class GarageManager : MonoBehaviour
 
     public void BuyDiscountUpgrade()
     {
-        float upgradePrice = 1500f + (_discountUpgradeLevel * 1500f);
+        int requiredPlayerLevel = _toolUpgradeLevel + 2; 
+
+        if (PlayerLevel < requiredPlayerLevel)
+        {
+            ShowWarning($"Цей інструмент доступний\nтільки з {requiredPlayerLevel} Рівня Гравця!");
+            return;
+        }
+
+        float upgradePrice = 1500f + (_toolUpgradeLevel * 1500f); 
         if (PlayerMoney >= upgradePrice)
         {
             PlayerMoney -= upgradePrice;
-            _discountUpgradeLevel++;
+            _toolUpgradeLevel++;
             SaveGame();
             UpdateUI();
             UpdateShopUI();
@@ -466,6 +594,8 @@ public class GarageManager : MonoBehaviour
         dataToSave.MoneyOfPlayer = PlayerMoney;
         dataToSave.toolUpgradeLevel = _toolUpgradeLevel;
         dataToSave.discountUpgradeLevel = _discountUpgradeLevel;
+        dataToSave.playerLevel = PlayerLevel;
+        dataToSave.playerXP = PlayerXP;
         SaveManager.Save(dataToSave);
     }
 }
